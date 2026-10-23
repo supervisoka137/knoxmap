@@ -3750,6 +3750,14 @@ def _doors_off_corners(storey, edges: set, corners: set) -> int:
                     stack.append(nxt)
         return seen
 
+    standing = {t for role, fx, fy, o in storey.furniture if _blocks(role)
+                for t in _tiles_under(role, fx, fy, o)}
+
+    def blocks(edge) -> int:
+        """Pieces standing either side of a doorway."""
+        ex, ey, ed = edge
+        return ((ex, ey) in standing) + (((ex - 1, ey) if ed == "W" else (ex, ey - 1)) in standing)
+
     moved = 0
     for i, (x, y, d) in enumerate(storey.doors):
         if (x, y) not in corners:
@@ -3770,8 +3778,12 @@ def _doors_off_corners(storey, edges: set, corners: set) -> int:
             spots = [s for pair, places in boundary.items()
                      if joinable(pair) and mine & set(pair) and homes(pair) == role
                      for s in places if s not in taken]
-        # The nearest first, so a front door stays on the front of the house.
-        spots.sort(key=lambda s: (abs(s[0] - x) + abs(s[1] - y), s))
+        # The nearest first, so a front door stays on the front of the house,
+        # but not onto furniture: the rooms are furnished by now, and a door
+        # slid onto a stove had it cleared out of the doorway (_clear_the_way)
+        # - most of the houses with nothing to cook on.
+        spots.sort(key=lambda s: (abs(s[0] - x) + abs(s[1] - y)
+                                  + DOOR_ON_FURNITURE_TILES * blocks(s), s))
         for spot in spots[:DOOR_SPOTS_TRIED]:
             trial = list(storey.doors)
             trial[i] = spot
@@ -4737,6 +4749,66 @@ def _furnish(plan: Plan, rng: random.Random,
             if role.startswith("counter") and wishlist.count(role) >= WISHLIST_COUNTERS:
                 continue
             wishlist.append(role)
+        plumbing_rooms = KITCHENS | {"kitchen", "bathroom", "laundry"}
+        side_scores = {side: [0, 0, 0] for side in step}
+        for x, y, facing in slots:
+            dx, dy = step[facing]
+            neighbor = _room_at(plan, x + dx, y + dy)
+            linked_plumbing = (neighbor and neighbor != idx
+                               and r.kind in plumbing_rooms
+                               and plan.rooms[neighbor - 1].kind in plumbing_rooms)
+            side_scores[facing][0] += int(bool(linked_plumbing))
+            side_scores[facing][1] += int(not on_facade((x, y, facing)))
+            side_scores[facing][2] += 1
+        side_order = sorted(step, key=lambda side: (
+            -side_scores[side][0], -side_scores[side][1], -side_scores[side][2], side))
+        side_rank = {side: rank for rank, side in enumerate(side_order)}
+        door_frontier = [(x, y) for x, y in door_tiles
+                         if _room_at(plan, x, y) == idx]
+
+        def slot_order(slot):
+            x, y, facing = slot
+            distance = min((abs(x - dx) + abs(y - dy) for dx, dy in door_frontier),
+                           default=0)
+            return side_rank[facing], -distance, y, x
+
+        floor_slots = sorted(slots, key=slot_order)
+
+        def stand(role: str) -> bool:
+            """Against the first wall it fits, clear of the doors; False if none."""
+            for (x, y, wanted) in floor_slots:
+                if role in NORTH_WEST_ONLY and wanted in ("S", "E"):
+                    continue
+                orient = _facing(role, wanted)
+                ax, ay = _wall_anchor(role, x, y, orient, wanted)
+                cells = _cells_for(role, ax, ay, orient)
+                if any(c in occupied or c in door_tiles for c in cells):
+                    continue
+                if any(_room_at(plan, cx, cy) != idx for cx, cy in cells):
+                    continue
+                front = set()
+                if _needs_front(role):
+                    # A fridge, a stove or a wardrobe is opened from the tile
+                    # in front of it; that tile stays floor.
+                    fx, fy = {"N": (0, 1), "S": (0, -1), "W": (1, 0), "E": (-1, 0)}[wanted]
+                    front = {(cx + fx, cy + fy) for cx, cy in cells} - set(cells)
+                    if any(c in occupied or _room_at(plan, *c) != idx for c in front):
+                        continue
+                occupied.update(cells)
+                occupied.update(front)
+                plan.furniture.append((role, ax, ay, orient))
+                return True
+            return False
+
+        # A home's stove and fridge go in before the middle: in a kitchen three
+        # tiles wide the table and its aisle took every tile in front of a
+        # wall, and 2.6% of Howell and Brighton's houses had nothing to cook on
+        # (Knox County: 0.4%). A kitchen without its table is still a kitchen.
+        if r.kind in KITCHENS and not (eatery or commercial_kitchen):
+            for first in COOK_FIRST:
+                role = next((w for w in wishlist if w.startswith(first)), None)
+                if role and stand(role):
+                    wishlist.remove(role)
         # The middle first, with an aisle round it the wall pieces must leave
         # free; placed after them, it almost never found room.
         before = len(plan.furniture)
@@ -4773,30 +4845,6 @@ def _furnish(plan: Plan, rng: random.Random,
                 wishlist.remove(bed)
                 if "sidetable" in wishlist:
                     wishlist.remove("sidetable")
-        plumbing_rooms = KITCHENS | {"kitchen", "bathroom", "laundry"}
-        side_scores = {side: [0, 0, 0] for side in step}
-        for x, y, facing in slots:
-            dx, dy = step[facing]
-            neighbor = _room_at(plan, x + dx, y + dy)
-            linked_plumbing = (neighbor and neighbor != idx
-                               and r.kind in plumbing_rooms
-                               and plan.rooms[neighbor - 1].kind in plumbing_rooms)
-            side_scores[facing][0] += int(bool(linked_plumbing))
-            side_scores[facing][1] += int(not on_facade((x, y, facing)))
-            side_scores[facing][2] += 1
-        side_order = sorted(step, key=lambda side: (
-            -side_scores[side][0], -side_scores[side][1], -side_scores[side][2], side))
-        side_rank = {side: rank for rank, side in enumerate(side_order)}
-        door_frontier = [(x, y) for x, y in door_tiles
-                         if _room_at(plan, x, y) == idx]
-
-        def slot_order(slot):
-            x, y, facing = slot
-            distance = min((abs(x - dx) + abs(y - dy) for dx, dy in door_frontier),
-                           default=0)
-            return side_rank[facing], -distance, y, x
-
-        floor_slots = sorted(slots, key=slot_order)
         for role in wishlist:
             if role == "bath_mat":
                 mat = _bath_mat_spot(plan, idx, r, occupied, keep_clear)
@@ -4831,28 +4879,7 @@ def _furnish(plan: Plan, rng: random.Random,
                     if hang(role, x, y, facing):
                         break
                 continue
-            for (x, y, wanted) in floor_slots:
-                if role in NORTH_WEST_ONLY and wanted in ("S", "E"):
-                    continue
-                orient = _facing(role, wanted)
-                ax, ay = _wall_anchor(role, x, y, orient, wanted)
-                cells = _cells_for(role, ax, ay, orient)
-                if any(c in occupied or c in door_tiles for c in cells):
-                    continue
-                if any(_room_at(plan, cx, cy) != idx for cx, cy in cells):
-                    continue
-                front = set()
-                if _needs_front(role):
-                    # A fridge, a stove or a wardrobe is opened from the tile
-                    # in front of it; that tile stays floor.
-                    fx, fy = {"N": (0, 1), "S": (0, -1), "W": (1, 0), "E": (-1, 0)}[wanted]
-                    front = {(cx + fx, cy + fy) for cx, cy in cells} - set(cells)
-                    if any(c in occupied or _room_at(plan, *c) != idx for c in front):
-                        continue
-                occupied.update(cells)
-                occupied.update(front)
-                plan.furniture.append((role, ax, ay, orient))
-                break
+            stand(role)
 
         if commercial_kitchen:
             # Steel counters, and no wall cupboards or microwave. A working
@@ -4886,6 +4913,11 @@ WORKTOP_ROOMS = ({"kitchen", "bathroom", "laundry", "breakroom", "openplan"}
 FRONT_CLEAR_ROLES = {"fridge", "stove", "stove_alt", "washer", "dryer", "wardrobe",
                      "bookshelf", "dresser", "dresser_alt", "filing_cabinet"}
 DOOR_CLEAR_DEPTH = 2
+# Placed in a home's kitchen before anything else stands in it (_furnish).
+COOK_FIRST = ("stove", "fridge")
+# How many tiles further along its wall a door slid off a corner goes, for each
+# piece of furniture it would otherwise land on (_doors_off_corners).
+DOOR_ON_FURNITURE_TILES = 3
 
 
 def _needs_front(role: str) -> bool:
