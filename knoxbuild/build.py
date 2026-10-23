@@ -222,6 +222,13 @@ ROW_RATIO = 2.2          # long side over short side
 ROW_MIN_DEPTH_M = 5.0    # any shallower and a unit has no room in it
 ROW_MAX_DEPTH_M = 32.0   # any deeper and it is a big shop, not a row
 ROW_MIN_LENGTH_M = 22.0
+# ...except a house, which is longer than that on its own. An American house
+# with its garage runs to about 30 m, and Microsoft's building footprints -
+# most of an American map's houses - take the attached garage in, so at 22 m
+# a ranch house was cut into three terraced houses of 8 m: 99 of the 131
+# house rows cut in a Howell, Michigan piece were under 36 m, 282 "homes"
+# that were somebody's one house.
+ROW_MIN_LENGTH_HOUSE_M = 36.0
 # Frontages: a terraced house is narrower than a shop unit.
 UNIT_FRONTAGE_M = {"house": 9.0, "apartment": 9.0}
 SHOP_FRONTAGE_M = 13.0
@@ -323,9 +330,11 @@ def row_units(fp, special: str | None, btag: str, n_uses: int,
         return _cut_big([fp], metres_per_tile, max_side)
     long_side = max(fp.width, fp.height) * metres_per_tile
     short_side = min(fp.width, fp.height) * metres_per_tile
-    if short_side < ROW_MIN_DEPTH_M or long_side < ROW_MIN_LENGTH_M:
-        return _cut_big([fp], metres_per_tile, max_side)
     terrace = btag in TERRACE_TAGS
+    shortest = (ROW_MIN_LENGTH_HOUSE_M if special in (None, "house") and not terrace
+                else ROW_MIN_LENGTH_M)
+    if short_side < ROW_MIN_DEPTH_M or long_side < shortest:
+        return _cut_big([fp], metres_per_tile, max_side)
     if not terrace:
         if short_side > ROW_MAX_DEPTH_M or long_side < short_side * ROW_RATIO:
             return _cut_big([fp], metres_per_tile, max_side)
@@ -374,6 +383,59 @@ def looks_like_apartment(tags: dict, area_tiles: int, rng,
     if (tags.get("building") or "").lower() in ("house", "detached", "bungalow"):
         return False
     return rng.random() < settings.apartment_chance
+
+
+# What a building OSM calls only building=yes is, when its shape says it is not
+# one family's house. Microsoft's footprints, which fill in the buildings OSM
+# lacks across most of America, carry nothing else, and in a Howell, Michigan
+# piece every one of them came out a house: 135 m hangars at the county
+# airport with 119 bedrooms, rows of storage units, 6,000 m2 big boxes. A row
+# longer than a house and no deeper than one is townhouses (row_units), a pole
+# barn or a storage block; a footprint far past any house is flats or a works.
+# All in metres, so the answer holds whatever the map's scale.
+HOUSE_MIN_DEPTH_M = 4.0        # narrower: a lean-to or a wall, not a house
+STRIP_MIN_DEPTH_M = 8.0        # a row shallower than this is garages or sheds
+TOWNHOUSE_MAX_LENGTH_M = 60.0  # a row longer than this is storage or hangars
+STRIP_MAX_DEPTH_M = 18.0
+STRIP_RATIO = 2.5
+# An untagged footprint over this is not one family's house - vanilla's
+# biggest are 400 m2 of floor - and over BIG_BLOCK_M2 not a block of flats
+# either.
+BIG_HOUSE_M2 = 600.0
+BIG_BLOCK_M2 = 2500.0
+# The blocks of flats guessed that way are garden apartments, Michigan's
+# two-and-three-storey walk-ups, not KnoxMap's city blocks of four or more.
+GUESSED_FLATS_MAX_LEVELS = 3
+
+
+def untagged_kind(fp, density: float, metres_per_tile: float = 1.0) -> str | None:
+    """The kind of an untagged footprint whose shape rules out a house, or None.
+
+    Asked only once everything KnoxMap reads first - the tags, the shops
+    inside it, the land use it stands on, tagged flats round it - has said
+    nothing. Out in the country (context.SPARSE) a long or big building is a
+    barn; in town a long one is storage units or hangars and a big one flats
+    or, past BIG_BLOCK_M2, a works.
+    """
+    from .context import SPARSE
+    length = fp.long_side * metres_per_tile
+    depth = fp.short_side * metres_per_tile
+    m2 = fp.tiles * metres_per_tile * metres_per_tile
+    rural = density < SPARSE
+    if depth < HOUSE_MIN_DEPTH_M:
+        return "shed"
+    if (length >= ROW_MIN_LENGTH_HOUSE_M and depth <= STRIP_MAX_DEPTH_M
+            and length >= STRIP_RATIO * depth):
+        if depth < STRIP_MIN_DEPTH_M:
+            return "shed"
+        if length <= TOWNHOUSE_MAX_LENGTH_M and not rural:
+            return None            # townhouses: row_units cuts it into homes
+        return "barn" if rural else "industrial"
+    if m2 > BIG_HOUSE_M2:
+        if rural:
+            return "barn"
+        return "apartment" if m2 <= BIG_BLOCK_M2 else "industrial"
+    return None
 
 
 # Metres of building per storey, for turning a height= into a floor count.
@@ -519,6 +581,11 @@ def classify_building(tags: dict) -> str | None:
         # not read at all, so an armoury came out as somebody's house.
         if key == "military" and value != "no":
             return "military"
+        # An aircraft hangar is a works-sized shed, not a house: the tagged
+        # ones at Howell, Michigan's airport came out with bedrooms. Only as
+        # building=*, so a base's military=hangar stays the base's.
+        if key == "building" and value == "hangar":
+            return "industrial"
     name = (tags.get("name") or "").lower()
     for needle, kind in SPECIAL_BY_NAME:
         if needle in name:
@@ -1461,6 +1528,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
     from_near = 0    # storeys borrowed from tagged neighbours
     from_osm = 0   # buildings whose storey count came from the data
     from_area = 0  # buildings whose kind came from the land around them
+    from_shape = 0  # untagged buildings too long or too big to be a house
     squared = 0    # buildings close enough to the grid to square up
     rows_split = 0   # rows of shops or terraces cut into their units
     units_made = 0   # and how many buildings those became
@@ -1686,6 +1754,15 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
             if around:
                 special = around
                 from_area += 1
+        # Last of all, the shape: a hangar or a big box is not a house just
+        # because nobody tagged it (untagged_kind).
+        guessed = None
+        if (special is None and btag in ("", "yes")
+                and levels_from_tags(tags, here) is None):
+            guessed = special = untagged_kind(fp, context.density(cx, cy),
+                                              metres_per_tile)
+            if guessed:
+                from_shape += 1
         commercial = special is not None or tags.get("building") in COMMERCIAL_TAGS
         if special is None and looks_like_apartment(tags, fp.tiles, style_rng,
                                                     here):
@@ -1695,6 +1772,8 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
                                            style_rng, here,
                                            metres_per_tile=metres_per_tile,
                                            region=region)
+        if guessed == "apartment" and not measured:
+            levels = min(levels, GUESSED_FLATS_MAX_LEVELS)
         if measured:
             from_osm += 1
         elif nearby is not None and (special or "house") in FOLLOWS_NEIGHBOURS:
@@ -2037,6 +2116,7 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
     print(f"  on real footprint   : {len(rows) - squared} turned, "
           f"{squared} squared up ({shaped} with irregular outlines)")
     print(f"  kind from land use  : {from_area}")
+    print(f"  kind from its shape : {from_shape}")
     print(f"  sheds and garages   : {sheds}")
     print(f"  rows cut into units : {rows_split} rows -> {units_made} buildings")
     if thinning:
