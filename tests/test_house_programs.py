@@ -118,11 +118,25 @@ class HousePrograms(unittest.TestCase):
 
 
 class Stoves(unittest.TestCase):
-    """Something to cook on in every house's kitchen. A door slid off a corner
-    after the rooms were furnished landed on the stove, and the way through it
-    was cleared by taking the stove out; in a narrow kitchen the table took
-    every spot it could stand. 2.6% of Howell and Brighton's houses had none,
-    and Knox County 0.4%."""
+    """Something to cook on in every house's kitchen. The way through to the
+    rooms behind a kitchen, or to a door slid off a corner after the rooms
+    were furnished, was cleared by taking the stove out; in a narrow kitchen
+    the table took every spot it could stand. 2.6% of Howell and Brighton's
+    houses had none, and Knox County 0.4%."""
+
+    def test_a_stove_in_the_way_goes_back_on_another_wall(self):
+        # A 6x5 kitchen and the bedroom behind it, whose door is where the
+        # stove stood until _clear_the_way took it out of the way.
+        plan = layout.Plan(8, 5, rooms=[layout.Room(0, 0, 5, 4, kind="kitchen"),
+                                        layout.Room(6, 0, 7, 4, kind="bedroom")],
+                           grid=[[1] * 6 + [2] * 2 for _ in range(5)],
+                           doors=[(0, 2, "W"), (6, 2, "W")])
+        plan.kind = "house"
+        layout._put_back(plan, {(0, 2)}, [("stove", 5, 2, "E")])
+        stoves = [f for f in plan.furniture if f[0] == "stove"]
+        self.assertEqual(len(stoves), 1)
+        self.assertNotEqual(stoves[0][1:3], (5, 2))
+        self.assertFalse(layout._open_up(plan, {(0, 2)}))
 
     def test_a_door_moved_off_a_corner_does_not_cost_the_stove(self):
         # A 4x4 kitchen whose door into the bedroom was slid onto the stove.

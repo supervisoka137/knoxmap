@@ -5617,14 +5617,63 @@ def _clear_the_way(building: "Building") -> int:
         starts = _ways_in(building, level, storey)
         if not starts:
             continue
+        lost = []
         for _round in range(6):
             gone = _open_up(storey, starts)
             if not gone:
                 break
+            lost += [f for i, f in enumerate(storey.furniture)
+                     if i in gone and f[0].startswith(COOK_FIRST)]
             storey.furniture = [f for i, f in enumerate(storey.furniture)
                                 if i not in gone]
             removed += len(gone)
+        if lost and storey.kind in HOME_KINDS:
+            _put_back(storey, starts, lost)
     return removed
+
+
+def _put_back(storey: "Plan", starts: set, lost: list) -> None:
+    """A stove or fridge taken out of the way goes back against a wall where
+    it is in nobody's way. It was in the way of a room behind the kitchen, or
+    of a door moved after the kitchen was furnished, and either way the
+    kitchen was left with nothing to cook on: 2.5% of a Howell piece's houses.
+    Inside walls first, then the facade; if no wall will do, it stays out."""
+    standing = {t for role, fx, fy, o in storey.furniture if _blocks(role)
+                for t in _tiles_under(role, fx, fy, o)}
+    door_edges = set(storey.doors)
+    step = {"N": (0, -1), "S": (0, 1), "W": (-1, 0), "E": (1, 0)}
+    for role, lx, ly, _o in lost:
+        idx = _room_at(storey, lx, ly)
+        room = storey.rooms[idx - 1] if idx else None
+        if room is None or any(f[0].startswith(role.split("_")[0])
+                               and _room_at(storey, f[1], f[2]) == idx
+                               for f in storey.furniture):
+            continue
+        slots = []
+        for y in range(room.y0, room.y1 + 1):
+            for x in range(room.x0, room.x1 + 1):
+                if storey.grid[y][x] != idx:
+                    continue
+                for facing, (dx, dy) in step.items():
+                    behind = _room_at(storey, x + dx, y + dy)
+                    if behind != idx:
+                        slots.append((behind != 0, x, y, facing))
+        for _inside, x, y, facing in sorted(slots, key=lambda s: (not s[0], s[1:])):
+            if _wall_edge(x, y, facing) in door_edges:
+                continue
+            orient = _facing(role, facing)
+            ax, ay = _wall_anchor(role, x, y, orient, facing)
+            cells = set(_cells_for(role, ax, ay, orient))
+            fx, fy = {"N": (0, 1), "S": (0, -1), "W": (1, 0), "E": (-1, 0)}[facing]
+            front = {(cx + fx, cy + fy) for cx, cy in cells} - cells
+            if any(c in standing or _room_at(storey, *c) != idx for c in cells | front):
+                continue
+            storey.furniture.append((role, ax, ay, orient))
+            if _open_up(storey, starts):
+                storey.furniture.pop()
+                continue
+            standing |= cells
+            break
 
 
 def build_building(width: int, height: int, levels: int = 1,
