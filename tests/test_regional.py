@@ -195,13 +195,15 @@ class RegionalStoreys(unittest.TestCase):
                 self.assertLessEqual(levels, 2, (region, levels))
 
     def test_large_houses_read_as_taller_than_small_ones(self):
-        small = {building_levels({}, None, 20, random.Random(i),
+        # Up to the plans the game builds tallest: two storeys on 60% of its
+        # houses of 140-200 m2, on a third of the smaller ones (regional.py).
+        small = [building_levels({}, None, 20, random.Random(i),
                                  self.settings, metres_per_tile=2.0)[0]
-                 for i in range(80)}
-        large = {building_levels({}, None, 200, random.Random(i),
+                 for i in range(200)]
+        large = [building_levels({}, None, 45, random.Random(i),
                                  self.settings, metres_per_tile=2.0)[0]
-                 for i in range(80)}
-        self.assertGreater(max(large), max(small))
+                 for i in range(200)]
+        self.assertGreater(sum(large), sum(small))
 
     def test_osm_levels_beat_every_table(self):
         for region in (None, "cn"):
