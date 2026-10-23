@@ -117,6 +117,54 @@ class HousePrograms(unittest.TestCase):
                 self.assertEqual(len(storey.doors), len(set(storey.doors)), seed)
 
 
+class Stoves(unittest.TestCase):
+    """Something to cook on in every house's kitchen. The way through to the
+    rooms behind a kitchen, or to a door slid off a corner after the rooms
+    were furnished, was cleared by taking the stove out; in a narrow kitchen
+    the table took every spot it could stand. 2.6% of Howell and Brighton's
+    houses had none, and Knox County 0.4%."""
+
+    def test_a_stove_in_the_way_goes_back_on_another_wall(self):
+        # A 6x5 kitchen and the bedroom behind it, whose door is where the
+        # stove stood until _clear_the_way took it out of the way.
+        plan = layout.Plan(8, 5, rooms=[layout.Room(0, 0, 5, 4, kind="kitchen"),
+                                        layout.Room(6, 0, 7, 4, kind="bedroom")],
+                           grid=[[1] * 6 + [2] * 2 for _ in range(5)],
+                           doors=[(0, 2, "W"), (6, 2, "W")])
+        plan.kind = "house"
+        layout._put_back(plan, {(0, 2)}, [("stove", 5, 2, "E")])
+        stoves = [f for f in plan.furniture if f[0] == "stove"]
+        self.assertEqual(len(stoves), 1)
+        self.assertNotEqual(stoves[0][1:3], (5, 2))
+        self.assertFalse(layout._open_up(plan, {(0, 2)}))
+
+    def test_a_door_moved_off_a_corner_does_not_cost_the_stove(self):
+        # A 4x4 kitchen whose door into the bedroom was slid onto the stove.
+        rng = random.Random(1)
+        for i in range(284):
+            w, h = rng.randint(7, 24), rng.randint(7, 20)
+            levels, street = rng.choice((1, 1, 2)), rng.choice("NSEW")
+        b = layout.build_building(w, h, levels=levels, seed=283, kind="house", street=street)
+        self.assertTrue(any(f[0].startswith("stove") for f in b.storeys[0].furniture))
+
+    def test_nearly_every_kitchen_has_a_stove(self):
+        rng = random.Random(2)
+        kitchens = without = 0
+        for i in range(300):
+            w, h = rng.randint(7, 24), rng.randint(7, 20)
+            b = layout.build_building(w, h, levels=rng.choice((1, 1, 2)), seed=i,
+                                      kind="house", street=rng.choice("NSEW"))
+            for plan in b.storeys:
+                for idx, room in enumerate(plan.rooms, 1):
+                    if room.kind not in ("kitchen", "openplan"):
+                        continue
+                    kitchens += 1
+                    without += not any(f[0].startswith("stove")
+                                       and layout._room_at(plan, f[1], f[2]) == idx
+                                       for f in plan.furniture)
+        self.assertLessEqual(without, kitchens // 100, f"{without} of {kitchens}")
+
+
 class HouseStoreys(unittest.TestCase):
     def test_house_storeys_are_the_games(self):
         self.assertEqual(set(area_level_pool(None, 60.0)), {1})
