@@ -112,5 +112,9 @@ VEG_CATEGORIES = {"forest", "scrub", "tree_single", "hedge", "orchard",
 # US suburb and a French village around 0.16.
 DENSE_COVERAGE = 0.28
 # Mapped green space keeps its grass however built-up the area around it is.
+# So does residential land: in an American suburb a block that dense is houses
+# with yards (Microsoft's footprints, which take in the garage, push a quarter
+# of Brighton's blocks past DENSE_COVERAGE), and a city's courtyards are mapped
+# as something else anyway.
 GREEN_CATEGORIES = {"park", "grass", "sports", "cemetery", "orchard", "farmland",
-                    "wetland", "hospital_grounds"}
+                    "wetland", "hospital_grounds", "residential"}

@@ -29,11 +29,25 @@ def _feature_coords_px(feat: OSMFeature, proj: Projector) -> list[list[tuple[flo
     return []
 
 
+# highway=* values OpenStreetMap reads as areas when closed, without area=yes.
+AREA_HIGHWAYS = {"rest_area", "services", "platform"}
+
+
 def _is_polygon(feat: OSMFeature) -> bool:
-    """Treat as polygon if first/last point match (way) or it's a relation."""
+    """Treat as polygon if first/last point match (way) or it's a relation.
+
+    Except a closed highway way, which OpenStreetMap reads as a loop of road
+    or pavement unless it says area=yes. US pavements are often mapped as one
+    loop round a block, and filled as an area the whole block came out
+    concrete: 1.1 km2 of yards in Howell and Brighton, Michigan.
+    """
     if feat.kind == "relation":
         return True
     if feat.kind == "way" and len(feat.geometry) >= 3:
+        highway = feat.tags.get("highway")
+        if (highway and highway not in AREA_HIGHWAYS
+                and feat.tags.get("area") != "yes"):
+            return False
         return feat.geometry[0] == feat.geometry[-1]
     return False
 
