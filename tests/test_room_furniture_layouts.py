@@ -129,13 +129,16 @@ class RoomFurnitureLayouts(unittest.TestCase):
         modern = BuildingProfile.infer(
             {"start_date": "1988", "class": "luxury"},
             "house", 0.2, 168, 1, 41)
-        old_building = layout.build_building(
-            14, 12, seed=0, kind="house", profile=older)
-        new_building = layout.build_building(
-            14, 12, seed=0, kind="house", profile=modern)
+        # Over a street of them, not one seed: which seed lands open plan moves
+        # whenever anything upstream draws from the same stream.
+        def open_plan(profile):
+            return sum(any(room.kind == "openplan" for room in layout.build_building(
+                14, 12, seed=seed, kind="house", profile=profile).rooms)
+                for seed in range(20))
 
-        self.assertNotIn("openplan", {room.kind for room in old_building.rooms})
-        self.assertIn("openplan", {room.kind for room in new_building.rooms})
+        old, new = open_plan(older), open_plan(modern)
+        self.assertGreater(new, old)
+        self.assertLess(old, 5)
 
     def test_extra_hall_bridges_unserved_room_clusters(self):
         rooms = [layout.Room(0, 3, 2, 5), layout.Room(3, 3, 5, 5),

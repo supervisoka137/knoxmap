@@ -180,9 +180,21 @@ CN_DEFAULT_LEVELS = {
 # were tuned against the ranges Arnis ships, re-based to one storey per
 # level and the sizes PZ rooms want, and they degrade to the old flat ranges
 # for any kind not listed.
+#
+# A house's are the game's own, measured over vanilla Build 42's 3,571 houses
+# by their ground floor: a third are two storeys up to 140 m2, 60% from there
+# to 200 (its biggest houses, two storeys on a big plan), and past 200 85% are
+# one storey. The old pools put a house of 300 m2 on two or three floors and
+# anything past 800 on up to four, and at true scale - where an American
+# house with its garage is 150 to 300 m2 - a Howell, Michigan piece came out
+# a third three- and four-storey houses, half of them 500 m2 of floor or
+# more. Vanilla's few three-storey houses past 200 are left out: on our plans
+# they were 600 m2 houses. Under 70 m2 a house keeps one floor: the stair
+# shaft takes 18 of it, and two storeys of what is left had no room for a
+# kitchen and a bathroom downstairs.
 AREA_LEVEL_TABLE = {
-    None: ((120, (1, 1, 1, 2)), (300, (1, 2, 2, 3)),
-           (800, (2, 2, 3, 3)), (None, (2, 3, 3, 4))),
+    None: ((70, (1,)), (140, (1,) * 13 + (2,) * 7), (200, (1, 1, 2, 2, 2)),
+           (None, (1,) * 17 + (2,) * 3)),
     "apartment": ((300, (2, 3, 3, 4)), (900, (3, 4, 4, 5)),
                   (2500, (4, 5, 6, 8)), (None, (5, 7, 9, 12))),
     "shop": ((100, (1, 1, 1, 2)), (350, (1, 2, 2)), (None, (2, 2, 3))),

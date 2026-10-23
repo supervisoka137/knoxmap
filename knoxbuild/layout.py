@@ -15,7 +15,7 @@ room indices, so we only ever paint rooms - we never emit wall objects.
 from __future__ import annotations
 
 import random
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 from . import catalog as C
@@ -1124,44 +1124,283 @@ def _graph_distance(adj: dict[int, dict[int, int]], start: int) -> dict[int, int
     return dist
 
 
-# Knox County's houses (546 measured) have per house about 1.4 bedrooms, 0.4
-# children's bedrooms, 0.5 closets and 0.2 laundries - and ours had three
-# bedrooms and an office apiece, every spare room another bedroom. A room this
-# small is a closet; the rest take turns down these lists.
 # A room this size or under is a closet rather than a bedroom. It was 8,
 # which no room can ever be: MIN_ROOM and MIN_SPLIT put the smallest room
 # the splitter can make at 9 tiles, so the rule never once fired and Knox
 # County's commonest small room - 5,397 closets - was one we never built.
 SMALL_ROOM_TILES = 10
-# Upstairs. The game's houses have 1.39 bedrooms and 0.42 children's rooms
-# each; ours had 2.15 and 1.21, an upstairs of nothing but beds. A closet on
-# the landing is what it really has - 0.50 a house, and none of ours had one.
-# A separate dining room, in Knox County, is in 13% of houses.
+# A separate dining room, in Knox County, is in 13% of houses. The share by
+# a house's size is in HOUSE_PROGRAMS; this is what the era and wealth of a
+# house (profile.py) are measured against.
 DINING_ROOM_SHARE = 0.13
-HOUSE_SLEEPING = ["bedroom", "kidsbedroom", "bedroom", "storage"]
-# What is left of a floor once its bedrooms, its bathroom and its one office
-# are dealt out. Everything past them used to become storage, which turned a
-# fourteen-room house into five bedrooms and nine store cupboards - 2747
-# storerooms in 200 houses against 321 before, and storage the commonest room
-# in a house by three times over. These are the rooms a house has more than
-# one of, and they are dealt round in turn.
-HOUSE_SPARE = ["storage", "laundry", "office", "storage", "closet", "office"]
-UPSTAIRS = ["bedroom", "kidsbedroom", "bedroom", "laundry",
-            "bedroom", "office", "storage"]
+
+# What a house holds, by how much floor it has.
+#
+# A house used to be cut into rooms of one size and the rooms named by count:
+# a living room, a kitchen, a bathroom, then bedrooms up to one per 90 m2 of
+# floor (five at most) and every room past that storage, laundry, office,
+# storage, closet, office in turn. Its floor was whatever its storeys made it,
+# so the more storeys the more spare rooms: a Howell, Michigan piece came out
+# at 19 rooms a house, 5.9 storerooms, 4.9 offices, 3.7 laundries and five
+# halls apiece, five bedrooms in 921 of 1,958 houses, and one bathroom in 90%
+# of them however big they were.
+#
+# These are the game's own houses instead: every building in vanilla Build
+# 42's Muldraugh, KY lotheaders with one kitchen, a bedroom and nothing a
+# business has - 3,571 of them, every town. By living floor (every storey,
+# the garage left out), up to this many m2: bedrooms and bathrooms as
+# percentages of those houses, and the share that have each of the rooms a
+# house may or may not have. A house is laid out for its own draw from these,
+# so a town has the game's spread rather than its average.
+HOUSE_PROGRAMS = [
+    (80, {1: 71, 2: 29}, {1: 99},
+     {"dining": 0.0, "laundry": 0.0, "hall": 0.07, "office": 0.1,
+      "kidsbedroom": 0.06, "closet": 0.3, "livingroom2": 0.01}),
+    (120, {1: 29, 2: 70, 3: 1}, {1: 81, 2: 19},
+     {"dining": 0.02, "laundry": 0.06, "hall": 0.13, "office": 0.01,
+      "kidsbedroom": 0.29, "closet": 0.78, "livingroom2": 0.2}),
+    (160, {1: 3, 2: 91, 3: 6}, {1: 22, 2: 76, 3: 2},
+     {"dining": 0.1, "laundry": 0.23, "hall": 0.32, "office": 0.05,
+      "kidsbedroom": 0.29, "closet": 0.85, "livingroom2": 0.56}),
+    (200, {2: 21, 3: 78, 4: 1}, {1: 6, 2: 57, 3: 36},
+     {"dining": 0.37, "laundry": 0.89, "hall": 0.89, "office": 0.06,
+      "kidsbedroom": 0.34, "closet": 0.93, "livingroom2": 0.41}),
+    (240, {1: 2, 2: 27, 3: 65, 4: 7}, {1: 6, 2: 40, 3: 54},
+     {"dining": 0.53, "laundry": 0.79, "hall": 0.81, "office": 0.29,
+      "kidsbedroom": 0.35, "closet": 0.8, "livingroom2": 0.42}),
+    (320, {2: 11, 3: 65, 4: 23, 5: 1}, {1: 4, 2: 13, 3: 79, 4: 4},
+     {"dining": 0.61, "laundry": 0.81, "hall": 0.83, "office": 0.31,
+      "kidsbedroom": 0.38, "closet": 0.79, "livingroom2": 0.27}),
+    (None, {2: 3, 3: 21, 4: 73, 5: 3}, {1: 3, 2: 15, 3: 74, 4: 8},
+     {"dining": 0.9, "laundry": 0.81, "hall": 0.84, "office": 0.19,
+      "kidsbedroom": 0.81, "closet": 0.85, "livingroom2": 0.16}),
+]
+# Every kind a house's rooms are dealt from (tools/selftest.py checks each has
+# furniture and a colour).
+HOUSE_KINDS = ("livingroom", "kitchen", "dining", "bedroom", "kidsbedroom",
+               "bathroom", "laundry", "hall", "office", "closet", "storage", "garage")
+
+# The garage. Vanilla's houses have one as often as this, by whole floor area
+# (garage included): none under 120 m2, a third at 200-240, nine in ten past
+# 320. Microsoft's footprints, which most of an American map's houses are,
+# take the attached garage in, and it was laid out as more bedrooms. Its
+# garages are 25-35 m2: one car's width or two, six deep, at the street end.
+HOUSE_GARAGE_SHARE = [(120, 0.0), (160, 0.09), (200, 0.22), (240, 0.33),
+                      (280, 0.38), (320, 0.57), (None, 0.9)]
+GARAGE_WIDTHS = (4, 6)
+GARAGE_TWO_CARS_FROM = 16        # tiles of front a two-car garage needs
+GARAGE_DEPTH = 6
+GARAGE_MIN_FRONT = 10            # a narrower house keeps its front for the house
+GARAGE_MIN_DEPTH = 9
+GARAGE_MAX_INSET = 4             # a turned footprint's front is a staircase
+# The splitter makes more rooms than floor / target, because it stops cutting
+# once a piece is under the target: measured, about 1.2 times as many at 24
+# tiles, 1.4 at 36 and 1.5 from 44.
+HOUSE_TARGET_TILES = (12, 42)
+# The game's closets are 2 m2 (ROOM_MEDIAN_AREA): two tiles out of a corner of
+# a bedroom, with a second in 15% of houses that have one.
+CLOSET_FROM_TILES = 12
+SECOND_CLOSET_SHARE = 0.15
+MAX_CLOSETS = 3
+LAUNDRY_MAX_TILES = 12
+LIVINGROOM2_MIN_TILES = 14
+# A bathroom is cut to about 9 tiles (SMALL_ROOM_RUN) and the game's is 6.5;
+# a second one, on the next smallest room, came out 12 or more. One this big
+# gives a two-deep strip to the laundry, or from LINEN_FROM_TILES a one-deep
+# linen closet.
+BATHROOM_TRIM_TILES = 12
+LINEN_FROM_TILES = 18
+# Where a house has no room left for its bathroom (a cabin, the ground floor
+# of a narrow two-storey), one is cut out of a corner: the game's smallest are
+# 2x2.
+CARVED_BATHROOM = ((2, 3), (3, 2), (2, 2))
 
 
-def _house_room_budgets(plan: Plan, levels: int) -> tuple[int, int]:
-    footprint = (sum(sum(row) for row in plan.mask)
-                 if plan.mask is not None else plan.width * plan.height)
-    floor_area = footprint * max(1, levels)
-    bedrooms = min(5, max(1, (floor_area + 89) // 90))
-    bathrooms = 2 if floor_area >= 900 else 1
-    return bedrooms, bathrooms
+@dataclass
+class HouseProgram:
+    """One house's rooms, drawn once for the whole building so that every
+    storey is laid out to the same household."""
+    bedrooms: int = 1
+    bathrooms: int = 1
+    wants: set = field(default_factory=set)   # dining, laundry, hall, office, ...
+    closets: int = 0
+    garage: tuple[int, int] | None = None     # (along the front, into the house)
+    garage_rect: tuple[int, int, int, int] | None = None
+    done: set = field(default_factory=set)    # rooms already given out
 
 
-def _house_bedrooms_on_floor(bedrooms: int, levels: int, level: int) -> int:
-    each, remainder = divmod(bedrooms, max(1, levels))
-    return each + (level < remainder)
+def _share_for(table, value) -> float:
+    for top, share in table:
+        if top is None or value < top:
+            return share
+    return table[-1][1]
+
+
+def _weighted(weights: dict, rng: random.Random) -> int:
+    roll = rng.random() * sum(weights.values())
+    for value, weight in weights.items():
+        roll -= weight
+        if roll < 0:
+            return value
+    return max(weights)
+
+
+def house_program(tiles: int, levels: int, frontage: int, depth: int,
+                  rng: random.Random, profile=None,
+                  garage: bool = True) -> HouseProgram:
+    """Draw a house's rooms from HOUSE_PROGRAMS for its floor area.
+
+    `tiles` is the footprint, `frontage` and `depth` the house measured along
+    and back from its street. The house's era and wealth (profile.py) still
+    move how likely a dining room and a study are, as they did, round the
+    game's own shares rather than one figure for every size of house.
+    """
+    home = HouseProgram()
+    floor = tiles * max(1, levels)
+    if (garage and frontage >= GARAGE_MIN_FRONT and depth >= GARAGE_MIN_DEPTH
+            and rng.random() < _share_for(HOUSE_GARAGE_SHARE, floor)):
+        wide = GARAGE_WIDTHS[1] if frontage >= GARAGE_TWO_CARS_FROM else GARAGE_WIDTHS[0]
+        home.garage = (wide, GARAGE_DEPTH)
+        floor -= wide * GARAGE_DEPTH
+    for top, beds, baths, chances in HOUSE_PROGRAMS:
+        if top is None or floor < top:
+            break
+    home.bedrooms = _weighted(beds, rng)
+    home.bathrooms = max(1, min(_weighted(baths, rng), home.bedrooms + 1))
+    chances = dict(chances)
+    if profile is not None:
+        chances["dining"] = min(0.95, chances["dining"]
+                                * _house_dining_share(profile) / DINING_ROOM_SHARE)
+        chances["office"] = min(0.95, chances["office"]
+                                * _house_study_share(profile) / 0.5)
+    home.wants = {k for k, p in chances.items() if rng.random() < p}
+    if "closet" in home.wants:
+        home.closets = 2 if rng.random() < SECOND_CLOSET_SHARE else 1
+    return home
+
+
+def _storey_wants(home: HouseProgram, level: int,
+                  levels: int) -> tuple[int, int, list[str]]:
+    """(bedrooms, bathrooms, rooms it may have) on one storey. The game's
+    two-storey houses keep the living room, the kitchen and a bathroom
+    downstairs (95% of them) and the bedrooms up (97%); a second living room
+    is upstairs as often as down."""
+    opts = ["hall", "dining", "laundry", "office", "livingroom2"]
+    if levels == 1:
+        return home.bedrooms, home.bathrooms, [k for k in opts if k in home.wants]
+    if level == 0:
+        return 0, 1, [k for k in opts[:4] if k in home.wants]
+    uppers, k = levels - 1, level - 1
+    beds = home.bedrooms // uppers + (1 if k < home.bedrooms % uppers else 0)
+    baths_up = max(1, home.bathrooms - 1)
+    baths = baths_up // uppers + (1 if k < baths_up % uppers else 0)
+    return beds, max(1 if level == 1 else 0, baths), \
+        [o for o in ("hall", "livingroom2") if o in home.wants and level == 1]
+
+
+def _house_target(floor: int, rooms: int) -> float:
+    """The room size that cuts `floor` tiles into about `rooms` rooms."""
+    def yield_at(t: float) -> float:
+        return 1.2 if t <= 24 else 1.4 if t <= 36 else 1.5
+    t = 1.3 * max(1, floor) / max(1, rooms)
+    t = yield_at(t) * max(1, floor) / max(1, rooms)
+    return min(HOUSE_TARGET_TILES[1], max(HOUSE_TARGET_TILES[0], t))
+
+
+def _garage_rect(width: int, height: int, mask, core, front: str,
+                 size: tuple[int, int]) -> tuple[int, int, int, int] | None:
+    """Where the garage goes: on the street front at the end the drive passes
+    (yards.py tries east and south first), wholly inside the footprint and
+    clear of the stairs, a few tiles in where a turned front is stepped."""
+    wide, deep = size
+    x1, y1 = width - 1, height - 1
+    along = range(x1 - wide + 1, -1, -1) if front in ("N", "S") \
+        else range(y1 - wide + 1, -1, -1)
+    for inset in range(GARAGE_MAX_INSET + 1):
+        for a in along:
+            if front == "S":
+                rect = (a, y1 - inset - deep + 1, a + wide - 1, y1 - inset)
+            elif front == "N":
+                rect = (a, inset, a + wide - 1, inset + deep - 1)
+            elif front == "E":
+                rect = (x1 - inset - deep + 1, a, x1 - inset, a + wide - 1)
+            else:
+                rect = (inset, a, inset + deep - 1, a + wide - 1)
+            gx0, gy0, gx1, gy1 = rect
+            if gx0 < 0 or gy0 < 0 or gx1 > x1 or gy1 > y1:
+                continue
+            if mask is not None and not all(mask[y][x] for y in range(gy0, gy1 + 1)
+                                            for x in range(gx0, gx1 + 1)):
+                continue
+            if core is not None and not (gx1 < core[0] or gx0 > core[2]
+                                         or gy1 < core[1] or gy0 > core[3]):
+                continue
+            # Out to the wall where it would leave a strip too thin for a
+            # room: the splitter would make one anyway and the mender fold
+            # it into whatever it touched.
+            if 0 < gx0 < MIN_ROOM:
+                gx0 = 0
+            if 0 < x1 - gx1 < MIN_ROOM:
+                gx1 = x1
+            if 0 < gy0 < MIN_ROOM:
+                gy0 = 0
+            if 0 < y1 - gy1 < MIN_ROOM:
+                gy1 = y1
+            if core is not None and not (gx1 < core[0] or gx0 > core[2]
+                                         or gy1 < core[1] or gy0 > core[3]):
+                continue
+            return gx0, gy0, gx1, gy1
+    return None
+
+
+def _house_rooms(plan: Plan, rng: random.Random, home: HouseProgram,
+                 level: int, levels: int, scale: float,
+                 mask: list[list[bool]] | None) -> None:
+    """Cut a house's storey into about as many rooms as its program has: so a
+    bigger house has bigger rooms rather than more of them. The garage is set
+    off first; the bathroom-sized room (SMALL_ROOM_RUN) is cut as ever."""
+    w, h = plan.width, plan.height
+    pieces = [(0, 0, w - 1, h - 1)]
+    floor = _inside(0, 0, w - 1, h - 1, mask)
+    if plan.core is not None:
+        cx0, cy0, cx1, cy1 = plan.core
+        floor -= (cx1 - cx0 + 1) * (cy1 - cy0 + 1)
+    if level == 0 and home.garage_rect is not None:
+        plan.rooms.append(Room(*home.garage_rect, kind="garage", fixed=True))
+        pieces = _subtract(pieces[0], [home.garage_rect])
+        floor -= _inside(*home.garage_rect, mask)
+    beds, baths, opts = _storey_wants(home, level, levels)
+    target = _house_target(floor, beds + baths + len(opts) + (2 if level == 0 else 0)) * scale
+    small = [True]
+    for piece in pieces:
+        _split(*piece, rng, MAX_DEPTH, plan.rooms, target_area=target,
+               mask=mask, small=small)
+
+
+def _square_garage(plan: Plan, rect: tuple[int, int, int, int]) -> None:
+    """Keep the garage its rectangle. The mender folds the wedges a turned
+    footprint leaves into whatever room they touch most, and a garage that took
+    them came out a triangle of sixty tiles; they go to the house instead."""
+    idx = next((i for i, r in enumerate(plan.rooms, 1) if r.kind == "garage"), None)
+    if idx is None:
+        return
+    stray = {(x, y) for y, row in enumerate(plan.grid) for x, v in enumerate(row)
+             if v == idx and not (rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3])}
+    while stray:
+        moved = False
+        for x, y in sorted(stray):
+            near = Counter(plan.grid[ny][nx] for nx, ny in ((x + 1, y), (x - 1, y),
+                                                             (x, y + 1), (x, y - 1))
+                           if 0 <= nx < plan.width and 0 <= ny < plan.height
+                           and plan.grid[ny][nx] not in (0, idx)
+                           and not plan.rooms[plan.grid[ny][nx] - 1].is_core)
+            if near:
+                plan.grid[y][x] = near.most_common(1)[0][0]
+                stray.discard((x, y))
+                moved = True
+        if not moved:
+            break
+    _refit(plan)
 
 
 def _house_open_plan_share(profile) -> float:
@@ -1273,81 +1512,106 @@ def _more_halls(plan: Plan, adj: dict, free: list, kinds: dict,
     return made
 
 
+def _tiles_by_room(plan: Plan) -> dict[int, list[tuple[int, int]]]:
+    out: dict[int, list] = {}
+    for y, row in enumerate(plan.grid):
+        for x, v in enumerate(row):
+            if v:
+                out.setdefault(v, []).append((x, y))
+    return out
+
+
+def _corridor_like(cells) -> bool:
+    xs = {x for x, _ in cells}
+    ys = {y for _, y in cells}
+    short, long_ = sorted((len(xs), len(ys)))
+    return short <= MIN_ROOM and long_ >= 2.5 * short
+
+
 def _assign_house_kinds(plan: Plan, level: int, levels: int,
                         stairs: tuple[int, int, str] | None = None,
-                        rng: random.Random | None = None) -> None:
-    """Rooms of a house, placed by what they sit next to.
+                        rng: random.Random | None = None,
+                        home: HouseProgram | None = None) -> None:
+    """Rooms of a house, placed by what they sit next to, to its program.
 
-    Handing kinds out in size order put the kitchen wherever the second-biggest
-    rectangle fell, bathrooms opening off living rooms, and a kitchen on every
-    storey of a three-storey house. Here the ground floor holds the rooms a
-    household shares - the living room, the kitchen beside it, dining beside
-    that - and upper floors hold bedrooms. Bedrooms go as far from the living
-    room as the plan allows; the bathroom takes the smallest room.
+    The ground floor holds the rooms a household shares - the living room,
+    the kitchen beside it, dining beside that - and upper floors the bedrooms,
+    which go as far from the living room as the plan allows, round a landing.
+    Bathrooms take the smallest rooms. How many of each comes from the house's
+    program (house_program), drawn once for the building; a room the program
+    has no use for is a hall if it is a corridor, a closet if it is small, and
+    otherwise part of the room beside it - not another storeroom or office.
     """
     rng = rng or random.Random(plan.width * 31 + plan.height)
+    if home is None:
+        footprint = _inside(0, 0, plan.width - 1, plan.height - 1, plan.mask)
+        home = house_program(footprint, levels, plan.width, plan.height,
+                             random.Random(plan.width * 7919 + plan.height),
+                             plan.profile, garage=False)
     adj = _neighbours(plan)
-    # A room the mapper drew with a kind of its own keeps it; only the rest
-    # are dealt out, and whatever is left out of that is a core, hence the
-    # hall below.
-    free = [i for i, r in enumerate(plan.rooms, 1)
-            if not r.is_core and not r.fixed]
-    for i, room in enumerate(plan.rooms, 1):
+    cells = _tiles_by_room(plan)
+    rooms = plan.rooms
+    # A room the mapper drew with a kind of its own keeps it, as does the
+    # garage; only the rest are dealt out, and whatever is left out of that is
+    # a core, hence the hall below.
+    free = [i for i, r in enumerate(rooms, 1)
+            if not r.is_core and not r.fixed and i in cells]
+    for i, room in enumerate(rooms, 1):
         if i not in free and not room.fixed:
             room.kind = "hall"
     if not free:
         return
-    area = {i: plan.rooms[i - 1].area for i in free}
+    garage = next((i for i, r in enumerate(rooms, 1) if r.kind == "garage"), None)
+    size = {i: len(cells[i]) for i in free}
+    beds, baths, opts = _storey_wants(home, level, levels)
     kinds: dict[int, str] = {}
-    bedroom_budget, bathroom_budget = _house_room_budgets(plan, levels)
-    bedroom_quota = _house_bedrooms_on_floor(bedroom_budget, levels, level)
-    bathroom_floors = {min(1, levels - 1)}
-    if bathroom_budget > 1:
-        bathroom_floors.add(0)
+    living = kitchen = None
+    # Open plan is decided first, so the kitchen can be the room beside the
+    # living room that the two make one room with (_merge_house_open_plan
+    # joins only two rooms that line up). Decided after, with the kitchen
+    # already chosen by size, a modern house came out open plan in 3 of 40
+    # tries where its profile asks for one in three.
+    open_plan = level == 0 and rng.random() < _house_open_plan_share(plan.profile)
 
     def take(i: int, kind: str) -> None:
         kinds[i] = kind
         free.remove(i)
 
-    if level == 0:
-        living = max(free, key=lambda i: area[i])
+    def lined_up(a: int, b: int) -> bool:
+        ra, rb = rooms[a - 1], rooms[b - 1]
+        return ((ra.y0, ra.y1) == (rb.y0, rb.y1) and (ra.x1 + 1 == rb.x0 or rb.x1 + 1 == ra.x0)
+                or (ra.x0, ra.x1) == (rb.x0, rb.x1) and (ra.y1 + 1 == rb.y0 or rb.y1 + 1 == ra.y0))
+
+    def spare(need: int) -> bool:
+        return len(free) > need
+
+    if level == 0 and levels == 1 and len(free) <= 3:
+        # A cabin: a kitchen to live in, a bed, then a bathroom.
+        for kind in ("kitchen", "bedroom", "bathroom"):
+            if free:
+                take(max(free, key=size.get), kind)
+    elif level == 0 and len(free) == 1:
+        take(free[0], "kitchen")         # its bathroom is cut out of it below
+    elif level == 0:
+        living = max(free, key=size.get)
         take(living, "livingroom")
-        if free:
-            near = [n for n in adj[living] if n in free] or free
-            kitchen = max(near, key=lambda i: area[i])
-            take(kitchen, "kitchen")
-            near = [n for n in adj[kitchen] if n in free]
-            # A separate dining room is the exception: Knox County has one in
-            # 13% of its houses, the rest eating in the kitchen or the living
-            # room. Taking one whenever there was a room to spare gave ours
-            # one in 93%.
-            if near and len(free) >= 3 and rng.random() < _house_dining_share(plan.profile):
-                take(max(near, key=lambda i: area[i]), "dining")
-        if free and level in bathroom_floors and (levels == 1 or len(free) >= 2):
-            take(min(free, key=lambda i: area[i]), "bathroom")
-        # A small room beside the kitchen is its laundry.
-        near = [n for n in adj.get(kitchens[0], ()) if n in free
-                and area[n] <= SMALL_ROOM_TILES] if (kitchens := [i for i, k in kinds.items()
-                                                                  if k == "kitchen"]) else []
-        if near:
-            take(min(near, key=lambda i: area[i]), "laundry")
-        _more_halls(plan, adj, free, kinds, [living] + [i for i, k in kinds.items()
-                                                        if k == "hall"],
-                    len(free) // ROOMS_PER_HALL)
-        dist = _graph_distance(adj, living)
-        rest = sorted(free, key=lambda i: -dist.get(i, 99))
-        bedroom_count = min(bedroom_quota, len(rest))
-        kids_room = bedroom_count > 1 and rng.random() < 0.4
-        for n, i in enumerate(rest):
-            if n < bedroom_count:
-                kinds[i] = "kidsbedroom" if kids_room and n == bedroom_count - 1 else "bedroom"
-            elif area[i] <= SMALL_ROOM_TILES:
-                kinds[i] = "closet"
-            elif n == bedroom_count:
-                kinds[i] = ("office" if rng.random() < _house_study_share(plan.profile)
-                            else "storage")
-            else:
-                kinds[i] = HOUSE_SPARE[(n - bedroom_count - 1) % len(HOUSE_SPARE)]
+        near = [n for n in adj[living] if n in free] or free
+        # The room nearest a kitchen's size (ROOM_MEDIAN_AREA): the biggest
+        # one beside the living room came out 27 m2 where the game's are 21,
+        # and fitted with 5.7 counters where the game's have 3.9.
+        kitchen = min(near, key=lambda i: (not (open_plan and lined_up(living, i)),
+                                           abs(size[i] - ROOM_MEDIAN_AREA["kitchen"])))
+        take(kitchen, "kitchen")
+        if "hall" in opts and spare(beds + baths):
+            hubs = [i for i in free if len(adj[i]) >= 3]
+            if hubs:
+                take(max(hubs, key=lambda i: (_corridor_like(cells[i]), len(adj[i]))),
+                     "hall")
+        if "dining" in opts and spare(beds + baths):
+            near = [n for n in adj[kitchen] if n in free] or \
+                [n for n in adj[living] if n in free]
+            if near:
+                take(max(near, key=size.get), "dining")
     else:
         # The landing. Without one an upstairs was a row of bedrooms opening
         # into each other, which is what a plan should never ask you to walk
@@ -1356,36 +1620,251 @@ def _assign_house_kinds(plan: Plan, level: int, levels: int,
         landing = _landing(plan, adj, free, stairs)
         if landing is not None and len(free) >= 3:
             take(landing, "hall")
-        _more_halls(plan, adj, free, kinds,
-                    [i for i, k in kinds.items() if k == "hall"],
-                    len(free) // ROOMS_PER_HALL)
-        if free and level in bathroom_floors:
-            take(min(free, key=lambda i: area[i]), "bathroom")
-        rest = sorted(free, key=lambda i: -area[i])
-        bedroom_count = min(bedroom_quota, len(rest))
-        kids_room = bedroom_count > 1 and rng.random() < 0.4
-        for n, i in enumerate(rest):
-            if n < bedroom_count:
-                kinds[i] = "kidsbedroom" if kids_room and n == bedroom_count - 1 else "bedroom"
-            elif area[i] <= SMALL_ROOM_TILES:
-                kinds[i] = "closet"
-            elif level == 1 and n == bedroom_count:
-                kinds[i] = "laundry"
-            elif n == bedroom_count:
-                kinds[i] = ("office" if rng.random() < _house_study_share(plan.profile)
-                            else "storage")
-            else:
-                kinds[i] = HOUSE_SPARE[(n - bedroom_count - 1) % len(HOUSE_SPARE)]
+    if free:
+        seeds = [i for i, k in kinds.items() if k in ("hall", "livingroom")]
+        _more_halls(plan, adj, free, kinds, seeds,
+                    min(len(free) // ROOMS_PER_HALL, max(0, len(free) - beds - baths)))
+    # Bathrooms are the smallest rooms. Downstairs there is always one; past
+    # that, and upstairs (where the ground floor has one), a bedroom comes
+    # before another bathroom.
+    least = (1 if free else 0) if level == 0 else (1 if len(free) > beds else 0)
+    for _ in range(min(len(free), max(least, min(baths, len(free) - beds)))):
+        take(min(free, key=size.get), "bathroom")
+    if "laundry" in opts and spare(beds):
+        small = [i for i in free if size[i] <= LAUNDRY_MAX_TILES]
+        near = [i for i in small if (kitchen and kitchen in adj[i])
+                or (garage and garage in adj[i])]
+        if near or small:
+            take(min(near or small, key=size.get), "laundry")
+            home.done.add("laundry")
+    if living is not None:
+        dist = _graph_distance(adj, living)
+        order = sorted(free, key=lambda i: (-dist.get(i, 99), -size[i]))
+    else:
+        order = sorted(free, key=lambda i: -size[i])
+    placed = []
+    for i in order[:beds]:
+        take(i, "bedroom")
+        placed.append(i)
+    if "kidsbedroom" in home.wants and "kidsbedroom" not in home.done and len(placed) >= 2:
+        kinds[min(placed, key=size.get)] = "kidsbedroom"
+        home.done.add("kidsbedroom")
+    if "office" in opts and "office" not in home.done and free:
+        take(min(free, key=lambda i: abs(size[i] - 12)), "office")
+        home.done.add("office")
+    if "livingroom2" in opts and "livingroom2" not in home.done and free:
+        big = max(free, key=size.get)
+        if size[big] >= LIVINGROOM2_MIN_TILES:
+            take(big, "livingroom")
+            home.done.add("livingroom2")
 
+    # What is left is a corridor, a cupboard, or part of the room beside it.
+    for i in sorted(free, key=size.get):
+        if _corridor_like(cells[i]):
+            take(i, "hall")
+        elif size[i] <= SMALL_ROOM_TILES:
+            take(i, "closet")
+    shared = ("livingroom", "dining", "hall") if level == 0 \
+        else ("hall", "bedroom", "livingroom")
+    fold: dict[int, int] = {}
+    while free:
+        # Into a named neighbour, or one already folded into one: a run of
+        # spare rooms joins the room at its end.
+        progress = False
+        for i in sorted(free, key=lambda i: -size[i]):
+            into = [n for n in adj[i] if n in kinds or n in fold]
+            # Not into rooms the open plan is about to join, which have to
+            # stay the rectangles they are.
+            # Nor into the kitchen, which is fitted out by its size.
+            into = [n for n in into if not rooms[n - 1].fixed
+                    and kinds.get(n) != "kitchen"
+                    and not (open_plan and n in (living, kitchen))]
+            if into:
+                fold[i] = max(into, key=lambda n: (kinds.get(n) in shared, adj[i][n]))
+                free.remove(i)
+                progress = True
+        if not progress:
+            for i in list(free):
+                take(i, "storage")
     for i, kind in kinds.items():
-        plan.rooms[i - 1].kind = kind
-    if level == 0 and rng.random() < _house_open_plan_share(plan.profile):
+        rooms[i - 1].kind = kind
+    if fold:
+        for row in plan.grid:
+            for x, v in enumerate(row):
+                while v in fold:
+                    v = fold[v]
+                row[x] = v
+        _renumber(plan)
+        _refit(plan)
+    if level == 0:
+        _ensure_bathroom(plan)
+    _carve_closets(plan, home)
+    _trim_bathrooms(plan, home)
+    _refit(plan)
+
+    if open_plan:
         living = next((i for i, room in enumerate(plan.rooms, 1)
                        if room.kind == "livingroom"), None)
         kitchen = next((i for i, room in enumerate(plan.rooms, 1)
                         if room.kind == "kitchen"), None)
         if living is not None and kitchen is not None:
             _merge_house_open_plan(plan, living, kitchen)
+
+
+def _carve(plan: Plan, cells, kind: str) -> None:
+    xs, ys = [x for x, _ in cells], [y for _, y in cells]
+    plan.rooms.append(Room(min(xs), min(ys), max(xs), max(ys), kind=kind))
+    for x, y in cells:
+        plan.grid[y][x] = len(plan.rooms)
+
+
+def _closets_in(home: HouseProgram) -> int:
+    return sum(1 for d in home.done if d.startswith(("closet", "walkin")))
+
+
+def _connected(cells: set) -> bool:
+    start = next(iter(cells))
+    seen, stack = {start}, [start]
+    while stack:
+        x, y = stack.pop()
+        for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if n in cells and n not in seen:
+                seen.add(n)
+                stack.append(n)
+    return len(seen) == len(cells)
+
+
+def _corner_rects(own: set, a: int, b: int):
+    """a x b rectangles, either way round, inside a room and in its corner."""
+    for x, y in sorted(own):
+        for w, h in sorted({(a, b), (b, a)}):
+            rect = [(x + i, y + j) for j in range(h) for i in range(w)]
+            if not all(c in own for c in rect):
+                continue
+            west = all((x - 1, y + j) not in own for j in range(h))
+            east = all((x + w, y + j) not in own for j in range(h))
+            north = all((x + i, y - 1) not in own for i in range(w))
+            south = all((x + i, y + h) not in own for i in range(w))
+            if (west or east) and (north or south):
+                yield rect
+
+
+BATHROOM_DONORS = ("bedroom", "livingroom", "hall", "kitchen", "kidsbedroom",
+                   "dining", "office")
+
+
+def _ensure_bathroom(plan: Plan) -> None:
+    """Every house has a bathroom downstairs, as every one of the game's has
+    one: where no room was left for it, a small one comes out of a corner."""
+    cells = _tiles_by_room(plan)
+    mine = [i for i, r in enumerate(plan.rooms, 1)
+            if i in cells and not r.is_core and r.kind != "garage"]
+    if any(plan.rooms[i - 1].kind == "bathroom" for i in mine):
+        return
+    donors = sorted((i for i in mine if plan.rooms[i - 1].kind in BATHROOM_DONORS),
+                    key=lambda i: (BATHROOM_DONORS.index(plan.rooms[i - 1].kind),
+                                   -len(cells[i])))
+    for idx in donors:
+        own = set(cells[idx])
+        for a, b in CARVED_BATHROOM:
+            for rect in _corner_rects(own, a, b):
+                rest = own - set(rect)
+                if len(rest) >= 6 and _connected(rest):
+                    _carve(plan, rect, "bathroom")
+                    return
+
+
+def _closet_spots(plan: Plan, own: set):
+    """Two-tile strips in a room's corners with an inside wall at their back
+    and the room in front: where a closet goes, its back to the next room so
+    no window is lost to it."""
+    h, w = len(plan.grid), len(plan.grid[0])
+
+    def inside_other(x, y):
+        return 0 <= x < w and 0 <= y < h and plan.grid[y][x] and (x, y) not in own
+
+    for x, y in sorted(own):
+        for dx, dy in ((1, 0), (0, 1)):
+            strip = ((x, y), (x + dx, y + dy))
+            if strip[1] not in own:
+                continue
+            ends = ((x - dx, y - dy), (x + 2 * dx, y + 2 * dy))
+            if all(e in own for e in ends):
+                continue                      # not in a corner
+            for bx, by in ((-dy, -dx), (dy, dx)):
+                back = [(sx + bx, sy + by) for sx, sy in strip]
+                ahead = [(sx - bx, sy - by) for sx, sy in strip]
+                if all(inside_other(*b) for b in back) and all(a in own for a in ahead):
+                    yield strip
+                    break
+
+
+def _carve_closets(plan: Plan, home: HouseProgram) -> None:
+    """The house's walk-in closets, two tiles in the corner of a bedroom."""
+    walkin = sum(1 for d in home.done if d.startswith("walkin"))
+    if walkin >= home.closets:
+        return
+    cells = _tiles_by_room(plan)
+    beds = sorted((i for i, r in enumerate(plan.rooms, 1)
+                   if r.kind in ("bedroom", "kidsbedroom")
+                   and len(cells.get(i, ())) >= CLOSET_FROM_TILES),
+                  key=lambda i: -len(cells[i]))
+    for idx in beds:
+        if walkin >= home.closets or _closets_in(home) >= MAX_CLOSETS:
+            break
+        own = set(cells[idx])
+        for strip in _closet_spots(plan, own):
+            rest = own - set(strip)
+            if len(rest) < 9 or not _connected(rest):
+                continue
+            _carve(plan, strip, "closet")
+            walkin += 1
+            home.done.add(f"walkin{walkin}")
+            break
+
+
+def _trim_bathrooms(plan: Plan, home: HouseProgram) -> None:
+    """The laundry, or a linen closet, off the end of an outsized bathroom."""
+    cells = _tiles_by_room(plan)
+    baths = sorted((i for i, r in enumerate(plan.rooms, 1)
+                    if r.kind == "bathroom" and i in cells),
+                   key=lambda i: -len(cells[i]))
+    for idx in baths:
+        own = set(cells[idx])
+        xs, ys = sorted({x for x, _ in own}), sorted({y for _, y in own})
+        w, h = len(xs), len(ys)
+        if len(own) != w * h or len(own) < BATHROOM_TRIM_TILES:
+            continue
+        if "laundry" in home.wants and "laundry" not in home.done:
+            kind, deep = "laundry", 2
+        elif len(own) >= LINEN_FROM_TILES and _closets_in(home) < MAX_CLOSETS:
+            kind, deep = "closet", 1
+        else:
+            continue
+        if max(w, h) - deep < 2:
+            continue
+        if w >= h:
+            ends = [[(x, y) for x in xs[:deep] for y in ys],
+                    [(x, y) for x in xs[-deep:] for y in ys]]
+        else:
+            ends = [[(x, y) for y in ys[:deep] for x in xs],
+                    [(x, y) for y in ys[-deep:] for x in xs]]
+
+        def inside_neighbours(strip) -> int:
+            # Other rooms round the strip: somewhere for its door other than
+            # through the bathroom.
+            n = 0
+            for x, y in strip:
+                for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    if (nx, ny) not in own and 0 <= ny < plan.height \
+                            and 0 <= nx < plan.width and plan.grid[ny][nx]:
+                        n += 1
+            return n
+        _carve(plan, max(ends, key=inside_neighbours), kind)
+        home.done.add(kind if kind == "laundry" else f"closet{_closets_in(home) + 1}")
+        cells = _tiles_by_room(plan)
+
+
 SHOP_BACK_ROOMS = ["storage", "office", "storage"]
 # A shop's back rooms take this share of its depth, within these many tiles.
 SHOP_BACK_SHARE = 0.3
@@ -2770,10 +3249,13 @@ def _exterior_door(plan: Plan, rng: random.Random,
         return
 
 
-def _widen_vehicle_entry(plan: Plan, street: str | None) -> None:
-    """Turn the street-facing garage entry into a three-tile door opening."""
+def _widen_vehicle_entry(plan: Plan, street: str | None,
+                         room: int | None = None) -> None:
+    """Turn the street-facing garage entry into a three-tile door opening.
+    `room` limits it to that room's walls: a house's garage, whose front door
+    must stay a door."""
     candidates = []
-    for room_id in range(1, len(plan.rooms) + 1):
+    for room_id in ([room] if room else range(1, len(plan.rooms) + 1)):
         for side, wall in _outside_runs(plan, room_id):
             for door in plan.doors:
                 if door in wall:
@@ -2798,6 +3280,23 @@ def _widen_vehicle_entry(plan: Plan, street: str | None) -> None:
         elif door not in opening:
             doors.append(door)
     plan.doors = doors
+
+
+def _garage_door(plan: Plan, street: str | None) -> None:
+    """A house's garage gets the garage building's vehicle opening
+    (_widen_vehicle_entry) in the wall facing the street, or failing that its
+    longest outside wall; its own way into the house comes from _doors."""
+    idx = next((i for i, r in enumerate(plan.rooms, 1) if r.kind == "garage"), None)
+    if idx is None:
+        return
+    runs = [(side, wall) for side, wall in _outside_runs(plan, idx) if len(wall) >= 3]
+    if not runs:
+        return
+    side, wall = max(runs, key=lambda r: (r[0] == (street or "S"), len(r[1])))
+    entry = wall[len(wall) // 2]
+    if entry not in plan.doors:
+        plan.doors.append(entry)
+    _widen_vehicle_entry(plan, side, room=idx)
 
 
 def _entrance_priority(entrance: tuple[float, float, dict]) -> tuple:
@@ -2931,8 +3430,13 @@ def _back_door(plan: Plan, street: str | None = None) -> None:
             for idx, room in enumerate(plan.rooms, 1):
                 if room.kind != kind or room.is_shaft:
                     continue
+                # Not the wall the front door is in: where the front door
+                # had gone on the back wall, the back door was hung on top of
+                # it, and 48 of 1,958 houses in a Howell piece had one door
+                # written twice and one way out.
                 runs = [wall for side, wall in _outside_runs(plan, idx)
-                        if len(wall) >= 3 and (side == wanted if wanted else
+                        if len(wall) >= 3 and not set(wall) & set(plan.doors)
+                        and (side == wanted if wanted else
                         abs(wall[len(wall) // 2][0] - fx) + abs(wall[len(wall) // 2][1] - fy) > 6)]
                 if runs:
                     wall = max(runs, key=len)
@@ -2972,8 +3476,13 @@ HOUSE_LIKE_KINDS = {"house", "barn", "shed", None}
 HOUSE_WINDOW_EVERY = 3
 WINDOW_CLEARANCE_SHUTTERED = 2
 # Most windows one room may take, whatever the facade offers it.
+# A garage in a house-like building takes one, its side window: with none, the
+# room over a house's garage had no window below it, and a two-storey house's
+# upstairs windows stood over the ones downstairs 59% of the time against the
+# 60% that tests/test_window_columns.py holds houses to. A garage building
+# (SERVICE_WINDOW_CAP) still has none.
 ROOM_WINDOW_CAP = {
-    "bathroom": 1, "storage": 1, "hall": 1, "garage": 0, "shed": 1, "elevator": 0,
+    "bathroom": 1, "storage": 1, "hall": 1, "garage": 1, "shed": 1, "elevator": 0,
     "kitchen": 2, "bedroom": 3, "dining": 3, "office": 2, "livingroom": 5,
     "kidsbedroom": 2, "closet": 0, "laundry": 1,
     "generalstore": 6, "conveniencestore": 6, "clothingstore": 6, "cafe": 6,
@@ -3241,6 +3750,14 @@ def _doors_off_corners(storey, edges: set, corners: set) -> int:
                     stack.append(nxt)
         return seen
 
+    standing = {t for role, fx, fy, o in storey.furniture if _blocks(role)
+                for t in _tiles_under(role, fx, fy, o)}
+
+    def blocks(edge) -> int:
+        """Pieces standing either side of a doorway."""
+        ex, ey, ed = edge
+        return ((ex, ey) in standing) + (((ex - 1, ey) if ed == "W" else (ex, ey - 1)) in standing)
+
     moved = 0
     for i, (x, y, d) in enumerate(storey.doors):
         if (x, y) not in corners:
@@ -3261,8 +3778,12 @@ def _doors_off_corners(storey, edges: set, corners: set) -> int:
             spots = [s for pair, places in boundary.items()
                      if joinable(pair) and mine & set(pair) and homes(pair) == role
                      for s in places if s not in taken]
-        # The nearest first, so a front door stays on the front of the house.
-        spots.sort(key=lambda s: (abs(s[0] - x) + abs(s[1] - y), s))
+        # The nearest first, so a front door stays on the front of the house,
+        # but not onto furniture: the rooms are furnished by now, and a door
+        # slid onto a stove had it cleared out of the doorway (_clear_the_way)
+        # - most of the houses with nothing to cook on.
+        spots.sort(key=lambda s: (abs(s[0] - x) + abs(s[1] - y)
+                                  + DOOR_ON_FURNITURE_TILES * blocks(s), s))
         for spot in spots[:DOOR_SPOTS_TRIED]:
             trial = list(storey.doors)
             trial[i] = spot
@@ -4151,13 +4672,16 @@ def _furnish(plan: Plan, rng: random.Random,
             continue
         shelving = [s for s in SHELVING.get(r.kind, DEFAULT_SHELVING)
                     if s in C.FURNITURE] or ["shelf"]
-        if plan.kind in HOME_KINDS:
-            # No warehouse racking in somebody's house.
+        # No warehouse racking in somebody's house - except its garage, which
+        # the game stocks from its mechanic table: counters, lockers, metal
+        # shelves.
+        indoors = plan.kind in HOME_KINDS and r.kind != "garage"
+        if indoors:
             keep = [s for s in shelving if s not in WAREHOUSE_ROLES]
             shelving = keep or ["shelf"]
         base = [rng.choice(shelving) if role == "shelf" else pal.get(role, role)
                 for role in base]
-        if plan.kind in HOME_KINDS:
+        if indoors:
             base = [HOME_STORE.get(role, role) for role in base]
         if _erika_ready():
             # With Erika's Tiles installed, pictures and plants come from its
@@ -4225,6 +4749,66 @@ def _furnish(plan: Plan, rng: random.Random,
             if role.startswith("counter") and wishlist.count(role) >= WISHLIST_COUNTERS:
                 continue
             wishlist.append(role)
+        plumbing_rooms = KITCHENS | {"kitchen", "bathroom", "laundry"}
+        side_scores = {side: [0, 0, 0] for side in step}
+        for x, y, facing in slots:
+            dx, dy = step[facing]
+            neighbor = _room_at(plan, x + dx, y + dy)
+            linked_plumbing = (neighbor and neighbor != idx
+                               and r.kind in plumbing_rooms
+                               and plan.rooms[neighbor - 1].kind in plumbing_rooms)
+            side_scores[facing][0] += int(bool(linked_plumbing))
+            side_scores[facing][1] += int(not on_facade((x, y, facing)))
+            side_scores[facing][2] += 1
+        side_order = sorted(step, key=lambda side: (
+            -side_scores[side][0], -side_scores[side][1], -side_scores[side][2], side))
+        side_rank = {side: rank for rank, side in enumerate(side_order)}
+        door_frontier = [(x, y) for x, y in door_tiles
+                         if _room_at(plan, x, y) == idx]
+
+        def slot_order(slot):
+            x, y, facing = slot
+            distance = min((abs(x - dx) + abs(y - dy) for dx, dy in door_frontier),
+                           default=0)
+            return side_rank[facing], -distance, y, x
+
+        floor_slots = sorted(slots, key=slot_order)
+
+        def stand(role: str) -> bool:
+            """Against the first wall it fits, clear of the doors; False if none."""
+            for (x, y, wanted) in floor_slots:
+                if role in NORTH_WEST_ONLY and wanted in ("S", "E"):
+                    continue
+                orient = _facing(role, wanted)
+                ax, ay = _wall_anchor(role, x, y, orient, wanted)
+                cells = _cells_for(role, ax, ay, orient)
+                if any(c in occupied or c in door_tiles for c in cells):
+                    continue
+                if any(_room_at(plan, cx, cy) != idx for cx, cy in cells):
+                    continue
+                front = set()
+                if _needs_front(role):
+                    # A fridge, a stove or a wardrobe is opened from the tile
+                    # in front of it; that tile stays floor.
+                    fx, fy = {"N": (0, 1), "S": (0, -1), "W": (1, 0), "E": (-1, 0)}[wanted]
+                    front = {(cx + fx, cy + fy) for cx, cy in cells} - set(cells)
+                    if any(c in occupied or _room_at(plan, *c) != idx for c in front):
+                        continue
+                occupied.update(cells)
+                occupied.update(front)
+                plan.furniture.append((role, ax, ay, orient))
+                return True
+            return False
+
+        # A home's stove and fridge go in before the middle: in a kitchen three
+        # tiles wide the table and its aisle took every tile in front of a
+        # wall, and 2.6% of Howell and Brighton's houses had nothing to cook on
+        # (Knox County: 0.4%). A kitchen without its table is still a kitchen.
+        if r.kind in KITCHENS and not (eatery or commercial_kitchen):
+            for first in COOK_FIRST:
+                role = next((w for w in wishlist if w.startswith(first)), None)
+                if role and stand(role):
+                    wishlist.remove(role)
         # The middle first, with an aisle round it the wall pieces must leave
         # free; placed after them, it almost never found room.
         before = len(plan.furniture)
@@ -4261,30 +4845,6 @@ def _furnish(plan: Plan, rng: random.Random,
                 wishlist.remove(bed)
                 if "sidetable" in wishlist:
                     wishlist.remove("sidetable")
-        plumbing_rooms = KITCHENS | {"kitchen", "bathroom", "laundry"}
-        side_scores = {side: [0, 0, 0] for side in step}
-        for x, y, facing in slots:
-            dx, dy = step[facing]
-            neighbor = _room_at(plan, x + dx, y + dy)
-            linked_plumbing = (neighbor and neighbor != idx
-                               and r.kind in plumbing_rooms
-                               and plan.rooms[neighbor - 1].kind in plumbing_rooms)
-            side_scores[facing][0] += int(bool(linked_plumbing))
-            side_scores[facing][1] += int(not on_facade((x, y, facing)))
-            side_scores[facing][2] += 1
-        side_order = sorted(step, key=lambda side: (
-            -side_scores[side][0], -side_scores[side][1], -side_scores[side][2], side))
-        side_rank = {side: rank for rank, side in enumerate(side_order)}
-        door_frontier = [(x, y) for x, y in door_tiles
-                         if _room_at(plan, x, y) == idx]
-
-        def slot_order(slot):
-            x, y, facing = slot
-            distance = min((abs(x - dx) + abs(y - dy) for dx, dy in door_frontier),
-                           default=0)
-            return side_rank[facing], -distance, y, x
-
-        floor_slots = sorted(slots, key=slot_order)
         for role in wishlist:
             if role == "bath_mat":
                 mat = _bath_mat_spot(plan, idx, r, occupied, keep_clear)
@@ -4319,28 +4879,7 @@ def _furnish(plan: Plan, rng: random.Random,
                     if hang(role, x, y, facing):
                         break
                 continue
-            for (x, y, wanted) in floor_slots:
-                if role in NORTH_WEST_ONLY and wanted in ("S", "E"):
-                    continue
-                orient = _facing(role, wanted)
-                ax, ay = _wall_anchor(role, x, y, orient, wanted)
-                cells = _cells_for(role, ax, ay, orient)
-                if any(c in occupied or c in door_tiles for c in cells):
-                    continue
-                if any(_room_at(plan, cx, cy) != idx for cx, cy in cells):
-                    continue
-                front = set()
-                if _needs_front(role):
-                    # A fridge, a stove or a wardrobe is opened from the tile
-                    # in front of it; that tile stays floor.
-                    fx, fy = {"N": (0, 1), "S": (0, -1), "W": (1, 0), "E": (-1, 0)}[wanted]
-                    front = {(cx + fx, cy + fy) for cx, cy in cells} - set(cells)
-                    if any(c in occupied or _room_at(plan, *c) != idx for c in front):
-                        continue
-                occupied.update(cells)
-                occupied.update(front)
-                plan.furniture.append((role, ax, ay, orient))
-                break
+            stand(role)
 
         if commercial_kitchen:
             # Steel counters, and no wall cupboards or microwave. A working
@@ -4374,6 +4913,11 @@ WORKTOP_ROOMS = ({"kitchen", "bathroom", "laundry", "breakroom", "openplan"}
 FRONT_CLEAR_ROLES = {"fridge", "stove", "stove_alt", "washer", "dryer", "wardrobe",
                      "bookshelf", "dresser", "dresser_alt", "filing_cabinet"}
 DOOR_CLEAR_DEPTH = 2
+# Placed in a home's kitchen before anything else stands in it (_furnish).
+COOK_FIRST = ("stove", "fridge")
+# How many tiles further along its wall a door slid off a corner goes, for each
+# piece of furniture it would otherwise land on (_doors_off_corners).
+DOOR_ON_FURNITURE_TILES = 3
 
 
 def _needs_front(role: str) -> bool:
@@ -5073,14 +5617,63 @@ def _clear_the_way(building: "Building") -> int:
         starts = _ways_in(building, level, storey)
         if not starts:
             continue
+        lost = []
         for _round in range(6):
             gone = _open_up(storey, starts)
             if not gone:
                 break
+            lost += [f for i, f in enumerate(storey.furniture)
+                     if i in gone and f[0].startswith(COOK_FIRST)]
             storey.furniture = [f for i, f in enumerate(storey.furniture)
                                 if i not in gone]
             removed += len(gone)
+        if lost and storey.kind in HOME_KINDS:
+            _put_back(storey, starts, lost)
     return removed
+
+
+def _put_back(storey: "Plan", starts: set, lost: list) -> None:
+    """A stove or fridge taken out of the way goes back against a wall where
+    it is in nobody's way. It was in the way of a room behind the kitchen, or
+    of a door moved after the kitchen was furnished, and either way the
+    kitchen was left with nothing to cook on: 2.5% of a Howell piece's houses.
+    Inside walls first, then the facade; if no wall will do, it stays out."""
+    standing = {t for role, fx, fy, o in storey.furniture if _blocks(role)
+                for t in _tiles_under(role, fx, fy, o)}
+    door_edges = set(storey.doors)
+    step = {"N": (0, -1), "S": (0, 1), "W": (-1, 0), "E": (1, 0)}
+    for role, lx, ly, _o in lost:
+        idx = _room_at(storey, lx, ly)
+        room = storey.rooms[idx - 1] if idx else None
+        if room is None or any(f[0].startswith(role.split("_")[0])
+                               and _room_at(storey, f[1], f[2]) == idx
+                               for f in storey.furniture):
+            continue
+        slots = []
+        for y in range(room.y0, room.y1 + 1):
+            for x in range(room.x0, room.x1 + 1):
+                if storey.grid[y][x] != idx:
+                    continue
+                for facing, (dx, dy) in step.items():
+                    behind = _room_at(storey, x + dx, y + dy)
+                    if behind != idx:
+                        slots.append((behind != 0, x, y, facing))
+        for _inside, x, y, facing in sorted(slots, key=lambda s: (not s[0], s[1:])):
+            if _wall_edge(x, y, facing) in door_edges:
+                continue
+            orient = _facing(role, facing)
+            ax, ay = _wall_anchor(role, x, y, orient, facing)
+            cells = set(_cells_for(role, ax, ay, orient))
+            fx, fy = {"N": (0, 1), "S": (0, -1), "W": (1, 0), "E": (-1, 0)}[facing]
+            front = {(cx + fx, cy + fy) for cx, cy in cells} - cells
+            if any(c in standing or _room_at(storey, *c) != idx for c in cells | front):
+                continue
+            storey.furniture.append((role, ax, ay, orient))
+            if _open_up(storey, starts):
+                storey.furniture.pop()
+                continue
+            standing |= cells
+            break
 
 
 def build_building(width: int, height: int, levels: int = 1,
@@ -5136,6 +5729,20 @@ def build_building(width: int, height: int, levels: int = 1,
         levels = 1          # nowhere to put a staircase, so one floor it is
 
     stairs = _stairs_in_core(core) if core is not None and levels > 1 else None
+    # A house's rooms are drawn once for the whole building, so every storey
+    # is laid out to the same household: the bedrooms upstairs are the ones
+    # the ground floor left out (house_program).
+    home = None
+    if kind in (None, "house") and not commercial and not uses and not hotel \
+            and not garage_door:
+        front = street if street in STEP_OF else "S"
+        frontage, depth = (width, height) if front in ("N", "S") else (height, width)
+        home = house_program(_inside(0, 0, width - 1, height - 1, mask), levels,
+                             frontage, depth, random.Random(seed ^ 0x40B5E),
+                             profile, garage=not mapped)
+        if home.garage is not None:
+            home.garage_rect = _garage_rect(width, height, mask, core, front,
+                                            home.garage)
     shaft = shaft_door = None
     if core is not None and levels >= ELEVATOR_FROM_LEVELS and min(width, height) >= ELEVATOR_MIN_SIDE:
         found = _pick_shaft(core, width, height, mask, stairs)
@@ -5172,7 +5779,7 @@ def build_building(width: int, height: int, levels: int = 1,
                    corridor=corridor, shaft=shaft, shaft_door=shaft_door,
                    street=street, uses=uses, hotel=hotel,
                    entrances=entrances if lvl == 0 else None,
-                   profile=profile, mapped=mapped,
+                   profile=profile, mapped=mapped, home=home,
                    party={e for e, up in (party or {}).items() if lvl < up})
         for lvl in range(levels)
     ]
@@ -5390,7 +5997,8 @@ def build_plan(width: int, height: int, commercial: bool = False,
                party: set | None = None,
                entrances: list[tuple[float, float, dict]] | None = None,
                profile: object | None = None,
-               mapped: list | None = None) -> Plan:
+               mapped: list | None = None,
+               home: HouseProgram | None = None) -> Plan:
     """Lay out and furnish one storey of the given tile size.
 
     `uses` are what OpenStreetMap says a commercial ground floor holds
@@ -5446,10 +6054,17 @@ def build_plan(width: int, height: int, commercial: bool = False,
             # above is cut as it always was.
             small = [house_floor]
             _mapped_rooms(plan, rng, mapped, target, mask, small)
+        elif home is not None and house_floor:
+            # A house is cut to its program, not to one room size: the
+            # room-size setting still scales it from the default.
+            _house_rooms(plan, rng, home, level, levels,
+                         settings.room_size / Settings().room_size, mask)
         else:
             _split(0, 0, width - 1, height - 1, rng, MAX_DEPTH, plan.rooms,
                    target_area=target, mask=mask, small=[house_floor])
     _paint(plan)
+    if home is not None and level == 0 and home.garage_rect is not None:
+        _square_garage(plan, home.garage_rect)
 
     # Kinds are chosen after painting, from the plan as it really is: what a
     # room is depends on what it borders, and that is only known once the
@@ -5486,7 +6101,7 @@ def build_plan(width: int, height: int, commercial: bool = False,
         _assign_kinds(rooms, COMMERCIAL, COMMERCIAL_FILL)
         _circulation(plan, rooms)
     else:
-        _assign_house_kinds(plan, level, levels, stairs, rng)
+        _assign_house_kinds(plan, level, levels, stairs, rng, home)
     for room in plan.rooms:
         if room.is_core:
             room.kind = "hall"
@@ -5504,6 +6119,8 @@ def build_plan(width: int, height: int, commercial: bool = False,
                        entrances=entrances)
         if kind in (None, "house"):
             _back_door(plan, street)
+            if home is not None:
+                _garage_door(plan, street)
         if kind == "retail":
             # Each shop its own street door, before the shop is fitted out
             # round it.
