@@ -1701,7 +1701,7 @@ def check_standing(check) -> None:
         for part in spec:
             names.update(part)
     names.update(_L.COMMERCIAL, _L.COMMERCIAL_FILL, _L.RESIDENTIAL_FILL,
-                 _L.HOUSE_SLEEPING, _L.UPSTAIRS)
+                 _L.HOUSE_KINDS)
     nostyle = sorted(n for n in names if n not in _L.ROOM_STYLE)
     check(not nostyle, f"every room a building can hold has furniture for it "
                        f"({'; '.join(nostyle) or 'all do'})")
